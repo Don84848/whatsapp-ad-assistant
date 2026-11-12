@@ -8,6 +8,7 @@ const {
 const pino = require("pino");
 const qrcode = require("qrcode-terminal");
 const path = require("path");
+const fs = require("fs");
 
 const {
   USE_PAIRING_CODE,
@@ -24,13 +25,166 @@ const {
 
 let waSock = null;
 let connectionStatus = "Disconnected";
+const authPath = path.join(__dirname, "auth_info_baileys");
 
 function getWhatsAppStatus() {
   return connectionStatus;
 }
 
+function bindSocketEvents(sock, saveCreds) {
+  // Save auth credentials automatically
+  sock.ev.on("creds.update", saveCreds);
+
+  // Handle connection updates
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr && !USE_PAIRING_CODE) {
+      console.log("\n[WhatsApp] Scan this QR Code to log in:");
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === "close") {
+      connectionStatus = "Disconnected / Reconnecting";
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const isRegistered = sock?.authState?.creds?.registered;
+
+      console.log(`[WhatsApp] Connection closed (code: ${statusCode}, registered: ${Boolean(isRegistered)})`);
+
+      // If registered and logged out explicitly
+      if (statusCode === DisconnectReason.loggedOut && isRegistered) {
+        console.log("[WhatsApp] Logged out from registered session.");
+        await notifyAdmin("⚠️ WhatsApp Bot was logged out from device. Use /pair <number> to re-link.");
+        try {
+          fs.rmSync(authPath, { recursive: true, force: true });
+        } catch (e) {}
+      } else if (!isRegistered) {
+        // Not registered yet and connection closed/timed out
+        console.log("[WhatsApp] Temporary pairing session expired. Ready for next attempt...");
+        try {
+          fs.rmSync(authPath, { recursive: true, force: true });
+        } catch (e) {}
+      }
+
+      // Automatically reconnect
+      setTimeout(() => {
+        startWhatsAppBot().catch(() => {});
+      }, 3500);
+    } else if (connection === "open") {
+      connectionStatus = "Connected (Online)";
+      console.log("\n=======================================================");
+      console.log("✅ WHATSAPP AD ASSISTANT BOT IS NOW ONLINE & CONNECTED!");
+      console.log("=======================================================\n");
+      await notifyAdmin("✅ WhatsApp AD Assistant Bot is now connected and online!");
+    }
+  });
+
+  // Handle incoming messages
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type !== "notify") return;
+
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
+      const jid = msg.key.remoteJid;
+      if (!jid || jid.endsWith("@broadcast") || jid.endsWith("@g.us")) continue;
+
+      const senderPhone = cleanPhoneNumber(jid.split("@")[0]);
+
+      if (!isNumberAllowed(senderPhone)) {
+        console.log(`[Whitelist] Ignored message from unlisted number: +${senderPhone}`);
+        continue;
+      }
+
+      const conversationText =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        msg.message.videoMessage?.caption ||
+        "";
+
+      if (!conversationText.trim()) continue;
+
+      const contactName = msg.pushName || `+${senderPhone}`;
+      console.log(`[WhatsApp Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
+
+      try {
+        await sock.readMessages([msg.key]);
+        await delay(800 + Math.floor(Math.random() * 700));
+        await sock.sendPresenceUpdate("composing", jid);
+
+        const aiReply = await getAIResponse(jid, conversationText);
+
+        const typingDelay = Math.min(Math.max(1200 + aiReply.length * 15, 1200), 2800);
+        await delay(typingDelay);
+
+        await sock.sendMessage(jid, { text: aiReply });
+        await sock.sendPresenceUpdate("available", jid);
+
+        console.log(`[AD Replied] To ${contactName}: "${aiReply}"`);
+
+        const notifyText = `💬 WhatsApp Chat:
+From: ${contactName} (+${senderPhone})
+Msg: "${conversationText}"
+AD: "${aiReply}"`;
+        await notifyAdmin(notifyText);
+      } catch (err) {
+        console.error(`[Error] Failed to process message from ${senderPhone}:`, err.message);
+      }
+    }
+  });
+}
+
+async function requestNewPairingCode(phoneNumber) {
+  const clean = cleanPhoneNumber(phoneNumber);
+  if (!clean) {
+    throw new Error("Invalid phone number format. Use country code without + (e.g. 923001234567)");
+  }
+
+  // End existing socket if any
+  try {
+    if (waSock) {
+      waSock.end(undefined);
+    }
+  } catch (e) {}
+
+  // Clean stale auth data
+  try {
+    fs.rmSync(authPath, { recursive: true, force: true });
+  } catch (e) {}
+
+  // Wait 1 second before recreating
+  await delay(1000);
+
+  const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  const { version } = await fetchLatestBaileysVersion();
+
+  waSock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false,
+    auth: state,
+    browser: ["Ubuntu", "Chrome", "20.0.04"]
+  });
+
+  setWhatsAppClient(waSock);
+  bindSocketEvents(waSock, saveCreds);
+
+  // Wait 3 seconds for the socket handshake to initialize
+  await delay(3000);
+
+  console.log(`[WhatsApp] Requesting pairing code for +${clean}...`);
+  const code = await waSock.requestPairingCode(clean);
+  const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+
+  console.log("\n=======================================================");
+  console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${formattedCode}`);
+  console.log("Enter this code in: WhatsApp > Linked Devices > Link with Phone Number");
+  console.log("=======================================================\n");
+
+  return formattedCode;
+}
+
 async function startWhatsAppBot() {
-  const authPath = path.join(__dirname, "auth_info_baileys");
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
@@ -46,136 +200,24 @@ async function startWhatsAppBot() {
   });
 
   setWhatsAppClient(waSock);
+  bindSocketEvents(waSock, saveCreds);
 
-  // If using pairing code and not yet registered
-  if (USE_PAIRING_CODE && !waSock.authState.creds.registered) {
-    if (!WHATSAPP_PHONE_NUMBER) {
-      console.log("\n=======================================================");
-      console.log("⚠️ WHATSAPP_PHONE_NUMBER is not set in .env!");
-      console.log("Please set your phone number (e.g. 923001234567) in .env");
-      console.log("Or set USE_PAIRING_CODE=false to scan via QR code in terminal.");
-      console.log("=======================================================\n");
-    } else {
-      setTimeout(async () => {
-        try {
-          const code = await waSock.requestPairingCode(WHATSAPP_PHONE_NUMBER);
-          const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
-          console.log("\n=======================================================");
-          console.log(`📲 YOUR WHATSAPP PAIRING CODE: ${formattedCode}`);
-          console.log("Enter this code in: WhatsApp > Linked Devices > Link with Phone Number");
-          console.log("=======================================================\n");
-          await notifyAdmin(`📲 WhatsApp Pairing Code: ${formattedCode}\nEnter this in WhatsApp > Linked Devices > Link with Phone Number`);
-        } catch (err) {
-          console.error("[WhatsApp] Error requesting pairing code:", err.message);
-        }
-      }, 3000);
-    }
-  }
-
-  // Handle connection updates
-  waSock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !USE_PAIRING_CODE) {
-      console.log("\n[WhatsApp] Scan this QR Code to log in:");
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === "close") {
-      connectionStatus = "Disconnected / Reconnecting";
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`[WhatsApp] Connection closed (code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
-
-      if (shouldReconnect) {
-        setTimeout(startWhatsAppBot, 4000);
-      } else {
-        console.log("[WhatsApp] Logged out. Delete auth_info_baileys folder to pair again.");
-        await notifyAdmin("⚠️ WhatsApp Bot logged out. Re-pairing needed.");
-      }
-    } else if (connection === "open") {
-      connectionStatus = "Connected (Online)";
-      console.log("\n=======================================================");
-      console.log("✅ WHATSAPP AD ASSISTANT BOT IS NOW ONLINE & CONNECTED!");
-      console.log("=======================================================\n");
-      await notifyAdmin("✅ WhatsApp AD Assistant Bot is now connected and online!");
-    }
-  });
-
-  // Save auth credentials automatically
-  waSock.ev.on("creds.update", saveCreds);
-
-  // Handle incoming messages
-  waSock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-
-    for (const msg of messages) {
-      // Ignore messages sent by bot itself, status broadcasts, and groups
-      if (!msg.message || msg.key.fromMe) continue;
-      const jid = msg.key.remoteJid;
-      if (!jid || jid.endsWith("@broadcast") || jid.endsWith("@g.us")) continue;
-
-      // Extract sender phone number
-      const senderPhone = cleanPhoneNumber(jid.split("@")[0]);
-
-      // Check Whitelist
-      if (!isNumberAllowed(senderPhone)) {
-        console.log(`[Whitelist] Ignored message from unlisted number: +${senderPhone}`);
-        continue;
-      }
-
-      // Extract text content from various message types
-      const conversationText =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
-        "";
-
-      if (!conversationText.trim()) continue;
-
-      const contactName = msg.pushName || `+${senderPhone}`;
-      console.log(`[WhatsApp Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
-
+  // If phone number is configured in .env and not registered
+  if (USE_PAIRING_CODE && !state.creds.registered && WHATSAPP_PHONE_NUMBER) {
+    setTimeout(async () => {
       try {
-        // Mark as read
-        await waSock.readMessages([msg.key]);
-
-        // Human reading delay (800ms - 1500ms)
-        await delay(800 + Math.floor(Math.random() * 700));
-
-        // Show typing indicator
-        await waSock.sendPresenceUpdate("composing", jid);
-
-        // Generate AD's response via Groq AI Brain
-        const aiReply = await getAIResponse(jid, conversationText);
-
-        // Human typing simulation proportional to length (1.2s - 2.8s)
-        const typingDelay = Math.min(Math.max(1200 + aiReply.length * 15, 1200), 2800);
-        await delay(typingDelay);
-
-        // Send response
-        await waSock.sendMessage(jid, { text: aiReply });
-        await waSock.sendPresenceUpdate("available", jid);
-
-        console.log(`[AD Replied] To ${contactName}: "${aiReply}"`);
-
-        // Notify Telegram Admin (@Daraz_Hacker)
-        const notifyText = `💬 WhatsApp Chat:
-From: ${contactName} (+${senderPhone})
-Msg: "${conversationText}"
-AD: "${aiReply}"`;
-        await notifyAdmin(notifyText);
+        const code = await requestNewPairingCode(WHATSAPP_PHONE_NUMBER);
+        await notifyAdmin(`📱 WhatsApp Pairing Code: ${code}\nEnter this in WhatsApp > Linked Devices > Link with Phone Number`);
       } catch (err) {
-        console.error(`[Error] Failed to process message from ${senderPhone}:`, err.message);
+        console.error("[WhatsApp] Error requesting pairing code:", err.message);
       }
-    }
-  });
+    }, 2000);
+  }
 }
 
 // Start Telegram Admin Bridge and WhatsApp Client
 console.log("Starting WhatsApp AD Assistant System...");
-startTelegramPolling(getWhatsAppStatus);
+startTelegramPolling(getWhatsAppStatus, requestNewPairingCode);
 startWhatsAppBot().catch((err) => {
   console.error("Fatal startup error:", err);
 });

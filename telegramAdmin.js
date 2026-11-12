@@ -13,6 +13,7 @@ const {
 let activeAdminChatId = TELEGRAM_ADMIN_ID || null;
 let lastUpdateId = 0;
 let isPolling = false;
+let requestPairingCodeFn = null;
 
 // Reference to WhatsApp client so admin can send messages via /say
 let waClientRef = null;
@@ -90,7 +91,7 @@ I am your WhatsApp AD Assistant Bridge.
 
   if (command === "/pair") {
     if (args.length === 0) {
-      await sendTelegramMessage(chatId, "⚠️ Usage: /pair <phone_number> (e.g. /pair 923001234567)");
+      await sendTelegramMessage(chatId, "⚠️ Usage: /pair <phone_number>\nExample: /pair 923001234567\n(Use country code without '+' or spaces)");
       return;
     }
     const phone = cleanPhoneNumber(args[0]);
@@ -98,18 +99,22 @@ I am your WhatsApp AD Assistant Bridge.
       await sendTelegramMessage(chatId, "❌ Invalid phone number. Please use country code without '+' (e.g. 923001234567)");
       return;
     }
-    if (!waClientRef) {
-      await sendTelegramMessage(chatId, "⚠️ WhatsApp client is still initializing. Please wait 5 seconds and try again.");
-      return;
-    }
-    if (waClientRef.authState && waClientRef.authState.creds && waClientRef.authState.creds.registered) {
+    if (waClientRef?.authState?.creds?.registered) {
       await sendTelegramMessage(chatId, "✅ WhatsApp is already linked and connected!");
       return;
     }
     try {
-      await sendTelegramMessage(chatId, `⏳ Requesting pairing code for +${phone}...`);
-      const code = await waClientRef.requestPairingCode(phone);
-      const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+      await sendTelegramMessage(chatId, `⏳ Connecting to WhatsApp servers for +${phone}...\nPlease wait 3-4 seconds.`);
+      let formattedCode;
+      if (requestPairingCodeFn) {
+        formattedCode = await requestPairingCodeFn(phone);
+      } else if (waClientRef) {
+        const code = await waClientRef.requestPairingCode(phone);
+        formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+      } else {
+        throw new Error("WhatsApp client is not ready yet. Please try again in 5 seconds.");
+      }
+
       const pairMsg = `📱 WhatsApp Pairing Code:
 🔑 ${formattedCode}
 
@@ -120,6 +125,7 @@ Steps to Link:
 4. Enter this code: ${formattedCode}`;
       await sendTelegramMessage(chatId, pairMsg);
     } catch (err) {
+      console.error("[Pair Error]", err);
       await sendTelegramMessage(chatId, `❌ Error requesting pairing code: ${err.message}`);
     }
     return;
@@ -207,7 +213,10 @@ Steps to Link:
   }
 }
 
-async function startTelegramPolling(getWhatsAppStatus) {
+async function startTelegramPolling(getWhatsAppStatus, pairCodeFn) {
+  if (pairCodeFn) {
+    requestPairingCodeFn = pairCodeFn;
+  }
   if (!TELEGRAM_BOT_TOKEN) {
     console.log("[Telegram Admin] TELEGRAM_BOT_TOKEN not provided, admin bridge disabled");
     return;
