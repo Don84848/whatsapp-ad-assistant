@@ -108,19 +108,33 @@ function bindSocketEvents(sock, saveCreds) {
       console.log(`[WhatsApp Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
 
       try {
+        // Step 1: Realistic delay before reading message (2.5s - 5.0s) to prevent bot detection
+        const readDelay = 2500 + Math.floor(Math.random() * 2500);
+        await delay(readDelay);
+
+        // Step 2: Mark as read (blue ticks appear like a real human opened the chat)
         await sock.readMessages([msg.key]);
-        await delay(800 + Math.floor(Math.random() * 700));
+
+        // Step 3: Thinking pause after reading before typing starts (1.5s - 3.0s)
+        const thinkDelay = 1500 + Math.floor(Math.random() * 1500);
+        await delay(thinkDelay);
+
+        // Step 4: Start WhatsApp typing presence
         await sock.sendPresenceUpdate("composing", jid);
 
+        // Step 5: Generate response (AI or authentic casual friend reply)
         const aiReply = await getAIResponse(jid, conversationText);
 
-        const typingDelay = Math.min(Math.max(1200 + aiReply.length * 15, 1200), 2800);
-        await delay(typingDelay);
+        // Step 6: Realistic typing duration based on message length (3.5s - 7.5s)
+        const typingDuration = 3500 + Math.floor(Math.random() * 2000) + Math.min(aiReply.length * 35, 3000);
+        await delay(typingDuration);
 
+        // Step 7: Send message and reset typing presence to paused
         await sock.sendMessage(jid, { text: aiReply });
-        await sock.sendPresenceUpdate("available", jid);
+        await sock.sendPresenceUpdate("paused", jid);
 
-        console.log(`[AD Replied] To ${contactName}: "${aiReply}"`);
+        const totalDelay = ((readDelay + thinkDelay + typingDuration) / 1000).toFixed(1);
+        console.log(`[AD Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
 
         const notifyText = `💬 WhatsApp Chat:
 From: ${contactName} (+${senderPhone})
