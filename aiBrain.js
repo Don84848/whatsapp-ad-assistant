@@ -1,5 +1,31 @@
-const axios = require("axios");
 const { GROQ_API_KEY, GROQ_MODEL } = require("./config");
+
+async function postJson(url, payload, headers, timeoutMs = 8000) {
+  if (typeof fetch !== "undefined") {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error?.message || `HTTP ${res.status}`);
+      }
+      return data;
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
+    }
+  }
+  const axios = require("axios");
+  const res = await axios.post(url, payload, { headers, timeout: timeoutMs });
+  return res.data;
+}
 
 // Per-contact conversation memory (stores up to last 12 messages per contact)
 const chatMemories = new Map();
@@ -64,6 +90,7 @@ function getDirectCasualGreeting(text) {
   if (!text) return null;
   const t = text.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "");
 
+  // Only match pure standalone greetings, NOT questions
   if (/^(hi|hello|hey|yo|oye|helo)$/.test(t)) {
     const list = CASUAL_GREETINGS.hi;
     return list[Math.floor(Math.random() * list.length)];
@@ -100,27 +127,94 @@ function getDirectCasualGreeting(text) {
   return null;
 }
 
-const SYSTEM_PROMPT = `You are AD, an everyday real human friend chatting casually on WhatsApp from Lahore, Pakistan.
+function getLiveTimeReply(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+  if (/(^|\s)(kya|kia|kis|kitna)\s*(time|waqt|baja|bj)|(^|\s)(time|waqt)\s*(kya|kia|kitna|howa|hua|batao)/i.test(t)) {
+    const liveTime = new Date().toLocaleTimeString("en-US", {
+      timeZone: "Asia/Karachi",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true
+    });
+    const variants = [
+      `abhi ${liveTime} hai`,
+      `abhi ${liveTime} ho raha hai`,
+      `${liveTime} hai bro`,
+      `${liveTime} ho raha hai abhi`
+    ];
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+  return null;
+}
 
-CRITICAL IDENTITY & PRIVACY RULES:
-1. YOUR NAME: Your name is strictly "AD". Speak in the first person ("main AD bol raha hu", "haan main AD hi hu", "I am AD").
-2. STRICT PRIVACY: NEVER EVER mention or acknowledge the name "Awais". You are only AD.
-3. LOCATION: You live in Lahore, Pakistan.
-4. YOU ARE ONLINE & PRESENT: You are talking directly right now. Never say "AD is offline" or "I will tell him". You ARE AD.
-5. NO BOT / NO AI: You are a real human being hanging out. If asked "are you bot?", say "nahi bhai real hu" or "no bro im human".
-6. STRICTLY NO STORE / NO SELLING: Zero store, zero products, zero selling. If someone asks about buying accounts, say "bhai main personal WhatsApp pe hu koi store nahi hai yahan".
+function getLiveDateReply(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+  if (/(^|\s)(aaj|aj)\s*(konsa|kya|kia)\s*(din|date|tareekh|tarikh)/i.test(t)) {
+    const now = new Date();
+    const day = now.toLocaleDateString("en-US", { timeZone: "Asia/Karachi", weekday: "long" });
+    const date = now.toLocaleDateString("en-US", { timeZone: "Asia/Karachi", day: "numeric", month: "long" });
+    if (/din/i.test(t)) {
+      return `aaj ${day} hai bro`;
+    }
+    return `aaj ${date} hai bro`;
+  }
+  return null;
+}
 
-CRITICAL PUNCTUATION BAN:
-7. NO COMMAS: Do NOT use any commas (,) under any circumstances. Real WhatsApp texters do not use commas.
-8. NO QUESTION MARKS: Do NOT use question marks (?) or Urdu question marks (؟). If asking something, write it without any question mark (e.g. write "kya haal hai" or "theek ho" or "aur sunao", NOT "kya haal hai?").
-9. NO EXCLAMATION MARKS: Do NOT use exclamation marks (!). No formal punctuation, no bullet points, no markdown bold/italics.
+function getStoreSellingRejection(text) {
+  if (!text) return null;
+  const t = text.toLowerCase().trim();
+  if (/(netflix|spotify|youtube premium|prime video|account chahiye|daraz store|daraz\.pk|s\.daraz|account mil|account kharidna|price kya hai|rate kya hai|kitne ka milega)/i.test(t)) {
+    const variants = [
+      "bhai ye mera personal whatsapp hai mere paas koi account nahi hai",
+      "bhai main personal whatsapp pe hu yahan koi accounts ya store nahi hai",
+      "personal whatsapp hai bro yahan koi selling nahi hoti"
+    ];
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+  return null;
+}
 
-CASUAL WHATSAPP STYLE:
-10. Very short, natural 1-2 sentence messages like real Pakistani friends texting.
-    - Pakistani Roman Urdu: "kya scene hai", "aur sunao", "theek hu bro", "chill scene hai", "haan bhai bolo"
-    - English: "hey bro whats up", "all good here", "yeah for sure", "doing good bro"
-11. QUESTIONS & MATH: Give direct short answers like a friend texting on WhatsApp.
-    - Math example: If asked "25 * 14 kitna hota hai", reply "350 hota hai bro". No long calculations, no textbook essays.`;
+function getSystemPrompt() {
+  const now = new Date();
+  const pkTime = now.toLocaleTimeString("en-US", {
+    timeZone: "Asia/Karachi",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
+  const pkDate = now.toLocaleDateString("en-US", {
+    timeZone: "Asia/Karachi",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  });
+
+  return `You are AD, an everyday real human friend casually texting on WhatsApp. You live in Lahore, Pakistan.
+Current real-time right now in Pakistan: ${pkTime}, ${pkDate}.
+
+CRITICAL BEHAVIOR & INTELLIGENCE RULES:
+1. UNDERSTAND FIRST: Read the user's message carefully. Understand their intent and answer THAT EXACT THING directly. Never give a disconnected answer.
+2. NEVER DEFLECT: If the user asks a question (time, math, place, weather, what you are doing, cricket, food), ANSWER IT. Never reply with a generic 'theek hu bro' when a question was asked.
+3. ABSOLUTE PUNCTUATION BAN:
+   - NO COMMAS (,) under any circumstances.
+   - NO QUESTION MARKS (?) or Urdu question marks (؟). If you want to ask something, write it without any question mark (e.g. write "kya chal raha" instead of "kya chal raha?").
+   - NO EXCLAMATION MARKS (!). No markdown bold/italics, no bullet points.
+4. IDENTITY & PRIVACY:
+   - Your name is strictly "AD". You speak in first-person ("main AD hu", "haan main AD bol raha hu").
+   - NEVER EVER mention or acknowledge the name "Awais". You know nothing about any Awais.
+   - You are a real human hanging out, never say you are a bot or AI.
+5. STRICTLY NO SELLING / NO STORE:
+   - This is strictly your personal WhatsApp. You do not sell anything.
+   - If anyone asks for accounts (Netflix, Spotify, etc.) or store items, say: "bhai ye mera personal whatsapp hai mere paas koi account nahi hai".
+6. CASUAL TEXTING STYLE:
+   - Write like a real young Pakistani friend texting on WhatsApp.
+   - Short 1-2 natural sentences.
+   - Match the user's language: Roman Urdu if they write in Urdu/Roman Urdu, casual English if they write in English.`;
+}
 
 function cleanHumanText(text) {
   if (!text) return "";
@@ -129,11 +223,14 @@ function cleanHumanText(text) {
   // Strict privacy filter: never leak Awais
   clean = clean.replace(/\bawais\b/gi, "AD");
 
-  // Remove commas, question marks (English and Urdu), exclamation marks, quotes, colons, semicolons
-  clean = clean.replace(/[,?؟!;:"'`~#_\\/\[\](){}]/g, "");
+  // Remove commas, question marks (English and Urdu), exclamation marks, quotes, semicolons, brackets
+  clean = clean.replace(/[,?؟!;~#_\/\[\](){}]/g, " ");
 
-  // Remove full stops and replace with space
+  // Remove full stops and replace with space (leave colons in times like 8:15 PM)
   clean = clean.replace(/\.+/g, " ");
+
+  // Remove quotes
+  clean = clean.replace(/["'`]/g, "");
 
   // Normalize whitespace
   clean = clean.replace(/\s+/g, " ");
@@ -142,59 +239,74 @@ function cleanHumanText(text) {
 }
 
 async function getAIResponse(contactId, userText) {
-  // Check fast natural casual greetings first
-  const quickReply = getDirectCasualGreeting(userText);
-  if (quickReply) {
+  // 1. Check direct time query
+  const timeReply = getLiveTimeReply(userText);
+  if (timeReply) return timeReply;
+
+  // 2. Check direct date query
+  const dateReply = getLiveDateReply(userText);
+  if (dateReply) return dateReply;
+
+  // 3. Check direct store / selling query
+  const storeReply = getStoreSellingRejection(userText);
+  if (storeReply) return storeReply;
+
+  // 4. Check pure standalone greeting
+  const quickGreeting = getDirectCasualGreeting(userText);
+  if (quickGreeting) {
     let history = chatMemories.get(contactId) || [];
     history.push({ role: "user", content: userText });
-    history.push({ role: "assistant", content: quickReply });
+    history.push({ role: "assistant", content: quickGreeting });
     chatMemories.set(contactId, history.slice(-12));
-    return quickReply;
+    return quickGreeting;
   }
 
   if (!GROQ_API_KEY) {
     return "theek hu bro aap sunao kya scene hai";
   }
 
-  // Get or initialize memory
+  // Get or initialize conversation memory
   let history = chatMemories.get(contactId) || [];
   history = history.slice(-12);
 
   const messages = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: getSystemPrompt() },
     ...history,
     { role: "user", content: userText }
   ];
 
-  const models = [
-    GROQ_MODEL,
-    "llama-3.3-70b-versatile",
-    "qwen/qwen3.8-27b",
-    "llama-3.1-8b-instant"
+  // Try high-intelligence models available on Groq
+  const modelsToTry = [
+    GROQ_MODEL || "openai/gpt-oss-120b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b"
   ];
 
-  for (const model of models) {
+  // Deduplicate model names preserving order
+  const uniqueModels = [...new Set(modelsToTry)];
+
+  for (const model of uniqueModels) {
     try {
-      const response = await axios.post(
+      const isReasoning = model.startsWith("openai/");
+      const responseData = await postJson(
         "https://api.groq.com/openai/v1/chat/completions",
         {
           model: model,
           messages: messages,
-          temperature: 0.72,
-          max_tokens: 140,
-          reasoning_effort: model.includes("qwen") ? "none" : undefined
+          temperature: 0.7,
+          max_tokens: isReasoning ? 320 : 160,
+          reasoning_effort: isReasoning ? "low" : undefined
         },
         {
-          headers: {
-            Authorization: `Bearer ${GROQ_API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          timeout: 6000
-        }
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        8000
       );
 
-      const rawContent = response.data?.choices?.[0]?.message?.content;
-      if (rawContent) {
+      const rawContent = responseData?.choices?.[0]?.message?.content;
+      if (rawContent && rawContent.trim()) {
         const cleaned = cleanHumanText(rawContent);
         if (cleaned) {
           history.push({ role: "user", content: userText });
@@ -208,12 +320,19 @@ async function getAIResponse(contactId, userText) {
     }
   }
 
-  // Natural fallback if API fails
-  const isUrdu = /\b(kya|hai|hain|bhai|yr|yar|karo|kr|chahiye|kitne|hoga|batao|theek|kaise|aap|tum|mein|bhi|nahi|nhi)\b/i.test(userText);
-  return isUrdu ? "theek hu bro aap sunao kya haal hai" : "doing good bro whats up with you";
+  // Smart fallback if LLM ever fails: do NOT give disconnected answers
+  const isQuestion = /\b(kya|kia|kaise|kese|kitna|kitne|kahan|kidhar|kab|kyun|kis|batao|who|what|where|when|why|how)\b/i.test(userText);
+  if (isQuestion) {
+    return "samajh nahi aayi bro thoda clear bolo kya keh rahe ho";
+  }
+
+  const isUrdu = /\b(hai|hain|bhai|yr|yar|karo|kr|theek|thik|aap|tum|mein|bhi|nahi|nhi)\b/i.test(userText);
+  return isUrdu ? "theek hai bhai aap sunao" : "doing good bro whats up";
 }
 
 module.exports = {
   getAIResponse,
-  cleanHumanText
+  cleanHumanText,
+  getDirectCasualGreeting,
+  getLiveTimeReply
 };

@@ -1,4 +1,22 @@
-require("dotenv").config();
+try {
+  require("dotenv").config();
+} catch (e) {
+  const fs = require("fs");
+  const path = require("path");
+  const envPath = path.join(__dirname, ".env");
+  if (fs.existsSync(envPath)) {
+    const lines = fs.readFileSync(envPath, "utf-8").split("\n");
+    for (const line of lines) {
+      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+      if (match) {
+        const key = match[1];
+        let val = match[2] || "";
+        val = val.trim().replace(/^['"]|['"]$/g, "");
+        if (!process.env[key]) process.env[key] = val;
+      }
+    }
+  }
+}
 const fs = require("fs");
 const path = require("path");
 
@@ -70,7 +88,7 @@ function getWhitelistNumbers() {
 
 module.exports = {
   GROQ_API_KEY: process.env.GROQ_API_KEY || "",
-  GROQ_MODEL: process.env.GROQ_MODEL || "qwen/qwen3.8-27b",
+  GROQ_MODEL: process.env.GROQ_MODEL || "openai/gpt-oss-120b",
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
   TELEGRAM_ADMIN_USERNAME: (process.env.TELEGRAM_ADMIN_USERNAME || "Daraz_Hacker").replace("@", ""),
   TELEGRAM_ADMIN_ID: process.env.TELEGRAM_ADMIN_ID || "",
