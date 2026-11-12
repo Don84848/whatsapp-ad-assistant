@@ -1,0 +1,28 @@
+{
+  "name": "whatsapp-ad-assistant",
+  "version": "1.0.0",
+  "description": "AI-powered WhatsApp Assistant Bot (AD) with Telegram Admin Bridge",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "baileys",
+    "telegram",
+    "ai",
+    "groq",
+    "assistant"
+  ],
+  "author": "Don84848",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.12",
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
