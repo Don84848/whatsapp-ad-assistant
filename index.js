@@ -86,7 +86,20 @@ function bindSocketEvents(sock, saveCreds) {
     for (const msg of messages) {
       if (!msg.message || msg.key.fromMe) continue;
       const jid = msg.key.remoteJid;
-      if (!jid || jid.endsWith("@broadcast") || jid.endsWith("@g.us")) continue;
+
+      // STRICT PRIVACY & SAFETY: ONLY process 1-on-1 private chats (@s.whatsapp.net)
+      // Never touch WhatsApp Channels (@newsletter), Status updates (@broadcast), Groups (@g.us), or system numbers
+      if (
+        !jid ||
+        !jid.endsWith("@s.whatsapp.net") ||
+        jid === "status@broadcast" ||
+        jid.endsWith("@newsletter") ||
+        jid.endsWith("@broadcast") ||
+        jid.endsWith("@g.us") ||
+        jid.startsWith("0@")
+      ) {
+        continue;
+      }
 
       const senderPhone = cleanPhoneNumber(jid.split("@")[0]);
 
@@ -108,16 +121,12 @@ function bindSocketEvents(sock, saveCreds) {
       console.log(`[WhatsApp Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
 
       try {
-        // Step 1: Realistic delay before reading message (2.5s - 5.0s) to prevent bot detection
-        const readDelay = 2500 + Math.floor(Math.random() * 2500);
-        await delay(readDelay);
-
-        // Step 2: Mark as read (blue ticks appear like a real human opened the chat)
-        await sock.readMessages([msg.key]);
-
-        // Step 3: Thinking pause after reading before typing starts (1.5s - 3.0s)
-        const thinkDelay = 1500 + Math.floor(Math.random() * 1500);
+        // Step 1: Human reaction delay before replying (3.0s - 5.5s) to prevent spam/ban
+        const thinkDelay = 3000 + Math.floor(Math.random() * 2500);
         await delay(thinkDelay);
+
+        // NOTE: We intentionally DO NOT call sock.readMessages()
+        // Incoming messages stay UNREAD on your phone so you can easily see who messaged!
 
         // Step 4: Start WhatsApp typing presence
         await sock.sendPresenceUpdate("composing", jid);
@@ -133,7 +142,7 @@ function bindSocketEvents(sock, saveCreds) {
         await sock.sendMessage(jid, { text: aiReply });
         await sock.sendPresenceUpdate("paused", jid);
 
-        const totalDelay = ((readDelay + thinkDelay + typingDuration) / 1000).toFixed(1);
+        const totalDelay = ((thinkDelay + typingDuration) / 1000).toFixed(1);
         console.log(`[AD Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
 
         const notifyText = `💬 WhatsApp Chat:

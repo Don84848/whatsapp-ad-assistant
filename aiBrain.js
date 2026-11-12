@@ -93,6 +93,18 @@ const CASUAL_GREETINGS = {
     "done",
     "theek hai",
     "chal theek"
+  ],
+  bye: [
+    "allah hafiz bro",
+    "chal theek take care",
+    "bye bro",
+    "allah hafiz"
+  ],
+  thanks: [
+    "koi scene nahi bro",
+    "welcome bro",
+    "koi baat nahi",
+    "chill hai bro"
   ]
 };
 
@@ -163,6 +175,18 @@ function getDirectCasualGreeting(text) {
   // "ok"
   if (/^(ok|okay|theek hai|thik hai|acha|achha|sahi|sahi hai|done|chal theek)$/.test(t)) {
     const list = CASUAL_GREETINGS.ok;
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  // "bye" / "allah hafiz"
+  if (/^(bye|tata|allah hafiz|alvida|cya|take care)$/.test(t)) {
+    const list = CASUAL_GREETINGS.bye;
+    return list[Math.floor(Math.random() * list.length)];
+  }
+
+  // "thanks" / "shukriya"
+  if (/^(thanks|shukriya|thank you|thx|ty|bohot shukriya)$/.test(t)) {
+    const list = CASUAL_GREETINGS.thanks;
     return list[Math.floor(Math.random() * list.length)];
   }
 
@@ -328,9 +352,9 @@ async function getAIResponse(contactId, userText) {
     return "theek hu bro aap sunao kya scene hai";
   }
 
-  // Get or initialize conversation memory
+  // Get or initialize conversation memory (limited to last 4 to save credits/tokens)
   let history = chatMemories.get(contactId) || [];
-  history = history.slice(-12);
+  history = history.slice(-4);
 
   const messages = [
     { role: "system", content: getSystemPrompt() },
@@ -338,12 +362,11 @@ async function getAIResponse(contactId, userText) {
     { role: "user", content: userText }
   ];
 
-  // Try high-intelligence models available on Groq
+  // Cost & credit-optimized models: 20b and qwen first to save credits, fallback to 120b
   const modelsToTry = [
-    GROQ_MODEL || "openai/gpt-oss-120b",
-    "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
-    "qwen/qwen3.8-27b"
+    "qwen/qwen3.8-27b",
+    GROQ_MODEL || "openai/gpt-oss-120b"
   ];
 
   // Deduplicate model names preserving order
@@ -358,7 +381,7 @@ async function getAIResponse(contactId, userText) {
           model: model,
           messages: messages,
           temperature: 0.7,
-          max_tokens: isReasoning ? 320 : 160,
+          max_tokens: isReasoning ? 120 : 60,
           reasoning_effort: isReasoning ? "low" : undefined
         },
         {
@@ -374,7 +397,7 @@ async function getAIResponse(contactId, userText) {
         if (cleaned) {
           history.push({ role: "user", content: userText });
           history.push({ role: "assistant", content: cleaned });
-          chatMemories.set(contactId, history.slice(-12));
+          chatMemories.set(contactId, history.slice(-4));
           return cleaned;
         }
       }
