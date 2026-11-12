@@ -95,11 +95,11 @@ function bindSocketEvents(sock, saveCreds, sessionId) {
       if (!msg.message || msg.key.fromMe) continue;
       const jid = msg.key.remoteJid;
 
-      // STRICT SAFETY: 1-on-1 private chats only (@s.whatsapp.net)
-      // Never touch WhatsApp Channels (@newsletter), Status updates (@broadcast), or Groups (@g.us)
+      const isDirectChat = jid.endsWith("@s.whatsapp.net") || jid.endsWith("@lid");
+      if (!isDirectChat) continue;
+
+      // STRICT PRIVACY: Ignore channels, status stories, groups, and system bots
       if (
-        !jid ||
-        !jid.endsWith("@s.whatsapp.net") ||
         jid === "status@broadcast" ||
         jid.endsWith("@newsletter") ||
         jid.endsWith("@broadcast") ||
@@ -112,11 +112,17 @@ function bindSocketEvents(sock, saveCreds, sessionId) {
       const senderPhone = cleanPhoneNumber(jid.split("@")[0]);
       if (!isNumberAllowed(senderPhone)) continue;
 
+      const innerMessage =
+        msg.message.ephemeralMessage?.message ||
+        msg.message.viewOnceMessage?.message ||
+        msg.message.viewOnceMessageV2?.message ||
+        msg.message;
+
       const conversationText =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        msg.message.videoMessage?.caption ||
+        innerMessage.conversation ||
+        innerMessage.extendedTextMessage?.text ||
+        innerMessage.imageMessage?.caption ||
+        innerMessage.videoMessage?.caption ||
         "";
 
       if (!conversationText.trim()) continue;
@@ -125,26 +131,30 @@ function bindSocketEvents(sock, saveCreds, sessionId) {
       console.log(`[WA Account ${sessionId} Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
 
       try {
-        // Step 1: Human thinking delay before typing (3.0s - 5.5s) to avoid bot detection
-        const thinkDelay = 3000 + Math.floor(Math.random() * 2500);
+        // Step 1: Human thinking delay before typing (2.5s - 4.5s) to avoid bot detection
+        const thinkDelay = 2500 + Math.floor(Math.random() * 2000);
         await delay(thinkDelay);
 
         // NOTE: We intentionally do NOT call sock.readMessages()
         // Incoming messages stay UNREAD on phone so you can easily review them!
 
-        // Step 2: Show WhatsApp typing indicator
-        await sock.sendPresenceUpdate("composing", jid);
+        // Step 2: Show WhatsApp typing indicator (safely guarded)
+        try {
+          await sock.sendPresenceUpdate("composing", jid);
+        } catch (e) {}
 
         // Step 3: Generate response
         const aiReply = await getAIResponse(jid, conversationText);
 
         // Step 4: Natural typing duration based on message length
-        const typingDuration = 3000 + Math.floor(Math.random() * 1500) + Math.min(aiReply.length * 35, 2500);
+        const typingDuration = 2500 + Math.floor(Math.random() * 1500) + Math.min(aiReply.length * 30, 2000);
         await delay(typingDuration);
 
         // Step 5: Send message and reset typing presence to paused
         await sock.sendMessage(jid, { text: aiReply });
-        await sock.sendPresenceUpdate("paused", jid);
+        try {
+          await sock.sendPresenceUpdate("paused", jid);
+        } catch (e) {}
 
         const totalDelay = ((thinkDelay + typingDuration) / 1000).toFixed(1);
         console.log(`[AD WA${sessionId} Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
