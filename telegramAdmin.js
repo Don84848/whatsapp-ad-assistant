@@ -77,6 +77,7 @@ async function handleTelegramCommand(message, getWhatsAppStatus) {
 I am your WhatsApp AD Assistant Bridge.
 
 📌 Available Commands:
+/pair <phone> - Get an 8-digit WhatsApp Pairing Code (e.g. /pair 923001234567)
 /status - Check WhatsApp connection & whitelist
 /add <phone> - Add a number to whitelist (e.g. /add 923001234567)
 /remove <phone> - Remove a number from whitelist
@@ -84,6 +85,43 @@ I am your WhatsApp AD Assistant Bridge.
 /allowall - Allow everyone who messages on WhatsApp
 /say <phone> <msg> - Send a message from AD's WhatsApp directly`;
     await sendTelegramMessage(chatId, welcome);
+    return;
+  }
+
+  if (command === "/pair") {
+    if (args.length === 0) {
+      await sendTelegramMessage(chatId, "⚠️ Usage: /pair <phone_number> (e.g. /pair 923001234567)");
+      return;
+    }
+    const phone = cleanPhoneNumber(args[0]);
+    if (!phone) {
+      await sendTelegramMessage(chatId, "❌ Invalid phone number. Please use country code without '+' (e.g. 923001234567)");
+      return;
+    }
+    if (!waClientRef) {
+      await sendTelegramMessage(chatId, "⚠️ WhatsApp client is still initializing. Please wait 5 seconds and try again.");
+      return;
+    }
+    if (waClientRef.authState && waClientRef.authState.creds && waClientRef.authState.creds.registered) {
+      await sendTelegramMessage(chatId, "✅ WhatsApp is already linked and connected!");
+      return;
+    }
+    try {
+      await sendTelegramMessage(chatId, `⏳ Requesting pairing code for +${phone}...`);
+      const code = await waClientRef.requestPairingCode(phone);
+      const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
+      const pairMsg = `📱 WhatsApp Pairing Code:
+🔑 ${formattedCode}
+
+Steps to Link:
+1. Open WhatsApp on your phone
+2. Tap ⋮ (Three dots) > Linked Devices > Link a Device
+3. Tap 'Link with phone number instead'
+4. Enter this code: ${formattedCode}`;
+      await sendTelegramMessage(chatId, pairMsg);
+    } catch (err) {
+      await sendTelegramMessage(chatId, `❌ Error requesting pairing code: ${err.message}`);
+    }
     return;
   }
 
