@@ -6,13 +6,10 @@ const {
   delay
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
-const qrcode = require("qrcode-terminal");
 const path = require("path");
 const fs = require("fs");
 
 const {
-  USE_PAIRING_CODE,
-  WHATSAPP_PHONE_NUMBER,
   isNumberAllowed,
   cleanPhoneNumber
 } = require("./config");
@@ -20,66 +17,77 @@ const { getAIResponse } = require("./aiBrain");
 const {
   startTelegramPolling,
   notifyAdmin,
-  setWhatsAppClient
+  registerSessionController
 } = require("./telegramAdmin");
 
-let waSock = null;
-let connectionStatus = "Disconnected";
-const authPath = path.join(__dirname, "auth_info_baileys");
+// Multi-account sessions map: id (1 or 2) -> { sock, status, authPath }
+const sessions = new Map();
 
-function getWhatsAppStatus() {
-  return connectionStatus;
+function getAuthPath(sessionId) {
+  return path.join(__dirname, sessionId === 1 ? "auth_info_baileys" : `auth_info_baileys_${sessionId}`);
 }
 
-function bindSocketEvents(sock, saveCreds) {
-  // Save auth credentials automatically
+function getSessionStatus(sessionId) {
+  return sessions.get(sessionId)?.status || "Disconnected";
+}
+
+function getAllStatuses() {
+  const s1 = getSessionStatus(1);
+  const s2 = getSessionStatus(2);
+  return { s1, s2 };
+}
+
+function isSessionRegistered(sessionId) {
+  const s = sessions.get(sessionId);
+  return Boolean(s?.sock?.authState?.creds?.registered);
+}
+
+function bindSocketEvents(sock, saveCreds, sessionId) {
+  const authPath = getAuthPath(sessionId);
+
   sock.ev.on("creds.update", saveCreds);
 
-  // Handle connection updates
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !USE_PAIRING_CODE) {
-      console.log("\n[WhatsApp] Scan this QR Code to log in:");
-      qrcode.generate(qr, { small: true });
-    }
+    const { connection, lastDisconnect } = update;
+    const sessionData = sessions.get(sessionId) || {};
 
     if (connection === "close") {
-      connectionStatus = "Disconnected / Reconnecting";
+      sessionData.status = "Disconnected / Reconnecting";
+      sessions.set(sessionId, sessionData);
+
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const isRegistered = sock?.authState?.creds?.registered;
 
-      console.log(`[WhatsApp] Connection closed (code: ${statusCode}, registered: ${Boolean(isRegistered)})`);
+      console.log(`[WhatsApp Account ${sessionId}] Connection closed (code: ${statusCode}, registered: ${Boolean(isRegistered)})`);
 
-      // If registered and logged out explicitly
       if (statusCode === DisconnectReason.loggedOut && isRegistered) {
-        console.log("[WhatsApp] Logged out from registered session.");
-        await notifyAdmin("⚠️ WhatsApp Bot was logged out from device. Use /pair <number> to re-link.");
+        console.log(`[WhatsApp Account ${sessionId}] Logged out from registered device.`);
+        await notifyAdmin(`⚠️ WhatsApp Account ${sessionId} was logged out from device. Use /pair${sessionId === 1 ? "" : "2"} <number> to re-link.`);
         try {
           fs.rmSync(authPath, { recursive: true, force: true });
         } catch (e) {}
       } else if (!isRegistered) {
-        // Not registered yet and connection closed/timed out
-        console.log("[WhatsApp] Temporary pairing session expired. Ready for next attempt...");
         try {
           fs.rmSync(authPath, { recursive: true, force: true });
         } catch (e) {}
       }
 
-      // Automatically reconnect
+      // Automatically reconnect if credentials directory exists
       setTimeout(() => {
-        startWhatsAppBot().catch(() => {});
-      }, 3500);
+        if (fs.existsSync(authPath)) {
+          startSession(sessionId).catch(() => {});
+        }
+      }, 4000);
     } else if (connection === "open") {
-      connectionStatus = "Connected (Online)";
-      console.log("\n=======================================================");
-      console.log("✅ WHATSAPP AD ASSISTANT BOT IS NOW ONLINE & CONNECTED!");
-      console.log("=======================================================\n");
-      await notifyAdmin("✅ WhatsApp AD Assistant Bot is now connected and online!");
+      sessionData.status = "Connected (Online)";
+      sessions.set(sessionId, sessionData);
+      console.log(`\n=======================================================`);
+      console.log(`✅ WHATSAPP ACCOUNT ${sessionId} IS ONLINE & CONNECTED!`);
+      console.log(`=======================================================\n`);
+      await notifyAdmin(`✅ WhatsApp Account ${sessionId} is now online and connected!`);
     }
   });
 
-  // Handle incoming messages
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type !== "notify") return;
 
@@ -87,8 +95,8 @@ function bindSocketEvents(sock, saveCreds) {
       if (!msg.message || msg.key.fromMe) continue;
       const jid = msg.key.remoteJid;
 
-      // STRICT PRIVACY & SAFETY: ONLY process 1-on-1 private chats (@s.whatsapp.net)
-      // Never touch WhatsApp Channels (@newsletter), Status updates (@broadcast), Groups (@g.us), or system numbers
+      // STRICT SAFETY: 1-on-1 private chats only (@s.whatsapp.net)
+      // Never touch WhatsApp Channels (@newsletter), Status updates (@broadcast), or Groups (@g.us)
       if (
         !jid ||
         !jid.endsWith("@s.whatsapp.net") ||
@@ -102,11 +110,7 @@ function bindSocketEvents(sock, saveCreds) {
       }
 
       const senderPhone = cleanPhoneNumber(jid.split("@")[0]);
-
-      if (!isNumberAllowed(senderPhone)) {
-        console.log(`[Whitelist] Ignored message from unlisted number: +${senderPhone}`);
-        continue;
-      }
+      if (!isNumberAllowed(senderPhone)) continue;
 
       const conversationText =
         msg.message.conversation ||
@@ -118,55 +122,85 @@ function bindSocketEvents(sock, saveCreds) {
       if (!conversationText.trim()) continue;
 
       const contactName = msg.pushName || `+${senderPhone}`;
-      console.log(`[WhatsApp Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
+      console.log(`[WA Account ${sessionId} Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
 
       try {
-        // Step 1: Human reaction delay before replying (3.0s - 5.5s) to prevent spam/ban
+        // Step 1: Human thinking delay before typing (3.0s - 5.5s) to avoid bot detection
         const thinkDelay = 3000 + Math.floor(Math.random() * 2500);
         await delay(thinkDelay);
 
-        // NOTE: We intentionally DO NOT call sock.readMessages()
-        // Incoming messages stay UNREAD on your phone so you can easily see who messaged!
+        // NOTE: We intentionally do NOT call sock.readMessages()
+        // Incoming messages stay UNREAD on phone so you can easily review them!
 
-        // Step 4: Start WhatsApp typing presence
+        // Step 2: Show WhatsApp typing indicator
         await sock.sendPresenceUpdate("composing", jid);
 
-        // Step 5: Generate response (AI or authentic casual friend reply)
+        // Step 3: Generate response
         const aiReply = await getAIResponse(jid, conversationText);
 
-        // Step 6: Realistic typing duration based on message length (3.5s - 7.5s)
-        const typingDuration = 3500 + Math.floor(Math.random() * 2000) + Math.min(aiReply.length * 35, 3000);
+        // Step 4: Natural typing duration based on message length
+        const typingDuration = 3000 + Math.floor(Math.random() * 1500) + Math.min(aiReply.length * 35, 2500);
         await delay(typingDuration);
 
-        // Step 7: Send message and reset typing presence to paused
+        // Step 5: Send message and reset typing presence to paused
         await sock.sendMessage(jid, { text: aiReply });
         await sock.sendPresenceUpdate("paused", jid);
 
         const totalDelay = ((thinkDelay + typingDuration) / 1000).toFixed(1);
-        console.log(`[AD Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
+        console.log(`[AD WA${sessionId} Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
 
-        const notifyText = `💬 WhatsApp Chat:
+        const notifyText = `💬 WhatsApp Account ${sessionId} Chat:
 From: ${contactName} (+${senderPhone})
 Msg: "${conversationText}"
 AD: "${aiReply}"`;
         await notifyAdmin(notifyText);
       } catch (err) {
-        console.error(`[Error] Failed to process message from ${senderPhone}:`, err.message);
+        console.error(`[Error WA Account ${sessionId}] Failed to process message from ${senderPhone}:`, err.message);
       }
     }
   });
 }
 
-async function requestNewPairingCode(phoneNumber) {
+async function startSession(sessionId) {
+  const authPath = getAuthPath(sessionId);
+
+  // If this session has never been paired and is not Account 1, leave as unlinked
+  if (!fs.existsSync(authPath) && sessionId !== 1) {
+    sessions.set(sessionId, { sock: null, status: "Not Linked", authPath });
+    return;
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+
+  console.log(`[WhatsApp Account ${sessionId}] Using Baileys version ${version.join(".")}, isLatest: ${isLatest}`);
+
+  const sock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false,
+    auth: state,
+    generateHighQualityLinkPreview: true,
+    browser: ["Ubuntu", "Chrome", "20.0.04"]
+  });
+
+  sessions.set(sessionId, { sock, status: "Connecting...", authPath });
+  bindSocketEvents(sock, saveCreds, sessionId);
+}
+
+async function requestPairing(phoneNumber, sessionId = 1) {
   const clean = cleanPhoneNumber(phoneNumber);
   if (!clean) {
     throw new Error("Invalid phone number format. Use country code without + (e.g. 923001234567)");
   }
 
-  // End existing socket if any
+  const authPath = getAuthPath(sessionId);
+  const existing = sessions.get(sessionId);
+
+  // Close existing socket if any
   try {
-    if (waSock) {
-      waSock.end(undefined);
+    if (existing?.sock) {
+      existing.sock.end(undefined);
     }
   } catch (e) {}
 
@@ -175,13 +209,12 @@ async function requestNewPairingCode(phoneNumber) {
     fs.rmSync(authPath, { recursive: true, force: true });
   } catch (e) {}
 
-  // Wait 1 second before recreating
   await delay(1000);
 
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version } = await fetchLatestBaileysVersion();
 
-  waSock = makeWASocket({
+  const sock = makeWASocket({
     version,
     logger: pino({ level: "silent" }),
     printQRInTerminal: false,
@@ -189,58 +222,62 @@ async function requestNewPairingCode(phoneNumber) {
     browser: ["Ubuntu", "Chrome", "20.0.04"]
   });
 
-  setWhatsAppClient(waSock);
-  bindSocketEvents(waSock, saveCreds);
+  sessions.set(sessionId, { sock, status: "Pairing...", authPath });
+  bindSocketEvents(sock, saveCreds, sessionId);
 
-  // Wait 3 seconds for the socket handshake to initialize
   await delay(3000);
 
-  console.log(`[WhatsApp] Requesting pairing code for +${clean}...`);
-  const code = await waSock.requestPairingCode(clean);
+  console.log(`[WhatsApp Account ${sessionId}] Requesting pairing code for +${clean}...`);
+  const code = await sock.requestPairingCode(clean);
   const formattedCode = code?.match(/.{1,4}/g)?.join("-") || code;
-
-  console.log("\n=======================================================");
-  console.log(`📱 YOUR WHATSAPP PAIRING CODE: ${formattedCode}`);
-  console.log("Enter this code in: WhatsApp > Linked Devices > Link with Phone Number");
-  console.log("=======================================================\n");
-
   return formattedCode;
 }
 
-async function startWhatsAppBot() {
-  const { state, saveCreds } = await useMultiFileAuthState(authPath);
-  const { version, isLatest } = await fetchLatestBaileysVersion();
+async function logoutSession(sessionId = 1) {
+  const authPath = getAuthPath(sessionId);
+  const existing = sessions.get(sessionId);
 
-  console.log(`[WhatsApp] Using Baileys version ${version.join(".")}, isLatest: ${isLatest}`);
+  try {
+    if (existing?.sock) {
+      await existing.sock.logout();
+      existing.sock.end(undefined);
+    }
+  } catch (e) {}
 
-  waSock = makeWASocket({
-    version,
-    logger: pino({ level: "silent" }),
-    printQRInTerminal: !USE_PAIRING_CODE,
-    auth: state,
-    generateHighQualityLinkPreview: true,
-    browser: ["Ubuntu", "Chrome", "20.0.04"]
-  });
+  try {
+    fs.rmSync(authPath, { recursive: true, force: true });
+  } catch (e) {}
 
-  setWhatsAppClient(waSock);
-  bindSocketEvents(waSock, saveCreds);
-
-  // If phone number is configured in .env and not registered
-  if (USE_PAIRING_CODE && !state.creds.registered && WHATSAPP_PHONE_NUMBER) {
-    setTimeout(async () => {
-      try {
-        const code = await requestNewPairingCode(WHATSAPP_PHONE_NUMBER);
-        await notifyAdmin(`📱 WhatsApp Pairing Code: ${code}\nEnter this in WhatsApp > Linked Devices > Link with Phone Number`);
-      } catch (err) {
-        console.error("[WhatsApp] Error requesting pairing code:", err.message);
-      }
-    }, 2000);
-  }
+  sessions.set(sessionId, { sock: null, status: "Logged Out", authPath });
 }
 
-// Start Telegram Admin Bridge and WhatsApp Client
-console.log("Starting WhatsApp AD Assistant System...");
-startTelegramPolling(getWhatsAppStatus, requestNewPairingCode);
-startWhatsAppBot().catch((err) => {
-  console.error("Fatal startup error:", err);
+async function sendMessage(phoneNumber, text, sessionId = 1) {
+  const clean = cleanPhoneNumber(phoneNumber);
+  const existing = sessions.get(sessionId);
+  if (!existing?.sock || !existing?.sock?.authState?.creds?.registered) {
+    throw new Error(`WhatsApp Account ${sessionId} is not connected.`);
+  }
+  const jid = `${clean}@s.whatsapp.net`;
+  await existing.sock.sendMessage(jid, { text });
+}
+
+// Register controller with Telegram admin bridge
+registerSessionController({
+  getAllStatuses,
+  isSessionRegistered,
+  requestPairing,
+  logoutSession,
+  sendMessage
 });
+
+// Start Telegram Admin Bridge and initial WhatsApp sessions
+console.log("Starting WhatsApp AD Assistant Multi-Account System...");
+startTelegramPolling();
+
+// Initialize Account 1 (and Account 2 if auth folder exists)
+startSession(1).catch((err) => console.error("Account 1 startup error:", err));
+if (fs.existsSync(getAuthPath(2))) {
+  startSession(2).catch((err) => console.error("Account 2 startup error:", err));
+} else {
+  sessions.set(2, { sock: null, status: "Not Linked", authPath: getAuthPath(2) });
+}
