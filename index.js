@@ -9,11 +9,16 @@ const pino = require("pino");
 const path = require("path");
 const fs = require("fs");
 
+const axios = require("axios");
 const {
   isNumberAllowed,
   cleanPhoneNumber
 } = require("./config");
-const { getAIResponse } = require("./aiBrain");
+const {
+  getAIResponse,
+  splitIntoBubbles,
+  getFollowUpResponse
+} = require("./aiBrain");
 const {
   startTelegramPolling,
   notifyAdmin,
@@ -22,6 +27,74 @@ const {
 
 // Multi-account sessions map: id (1 or 2) -> { sock, status, authPath }
 const sessions = new Map();
+
+// Contact follow-up re-engagement tracker:
+// jid -> { consecutiveCount: number, lastUserMsgTime: number, lastBotMsgTime: number, timer: NodeJS.Timeout | null, sessionId: number }
+const contactFollowUps = new Map();
+const MAX_CONSECUTIVE_FOLLOWUPS = 3; // Maximum 3 bot messages total without reply
+const INITIAL_FOLLOWUP_DELAY_MS = 20 * 60 * 1000; // 20 minutes for first follow-up
+const SUBSEQUENT_FOLLOWUP_DELAY_MS = 50 * 60 * 1000; // 50 minutes for subsequent follow-ups
+
+function scheduleWhatsAppFollowUp(jid, sessionId) {
+  const data = contactFollowUps.get(jid);
+  if (!data) return;
+  if (data.timer) {
+    clearTimeout(data.timer);
+    data.timer = null;
+  }
+
+  if (data.consecutiveCount >= MAX_CONSECUTIVE_FOLLOWUPS) {
+    console.log(`[Follow-up WA] Reached max consecutive limit (${data.consecutiveCount}) for ${jid}. Stopping follow-ups.`);
+    return;
+  }
+
+  const delayMs = data.consecutiveCount === 1 ? INITIAL_FOLLOWUP_DELAY_MS : SUBSEQUENT_FOLLOWUP_DELAY_MS;
+  console.log(`[Follow-up WA] Scheduled follow-up #${data.consecutiveCount + 1} for ${jid} in ${(delayMs / 60000).toFixed(0)}m`);
+
+  data.timer = setTimeout(async () => {
+    try {
+      const currentData = contactFollowUps.get(jid);
+      if (!currentData || currentData.consecutiveCount >= MAX_CONSECUTIVE_FOLLOWUPS) return;
+
+      const s = sessions.get(sessionId);
+      if (!s?.sock || !s?.sock?.authState?.creds?.registered) return;
+
+      console.log(`[Follow-up WA] Triggering smart follow-up #${currentData.consecutiveCount + 1} for ${jid}`);
+
+      try {
+        await s.sock.sendPresenceUpdate("composing", jid);
+      } catch (e) {}
+
+      const followUpText = await getFollowUpResponse(jid);
+      const typingDuration = 2000 + Math.floor(Math.random() * 1500);
+      await delay(typingDuration);
+
+      const bubbles = splitIntoBubbles(followUpText, 2);
+      for (let b = 0; b < bubbles.length; b++) {
+        if (b > 0) {
+          await delay(1200 + Math.floor(Math.random() * 800));
+          try { await s.sock.sendPresenceUpdate("composing", jid); } catch (e) {}
+          await delay(1400);
+        }
+        await s.sock.sendMessage(jid, { text: bubbles[b] });
+        try { await s.sock.sendPresenceUpdate("paused", jid); } catch (e) {}
+      }
+
+      currentData.consecutiveCount += 1;
+      currentData.lastBotMsgTime = Date.now();
+      contactFollowUps.set(jid, currentData);
+
+      console.log(`[Follow-up WA Sent] To ${jid}: "${followUpText}" (Count: ${currentData.consecutiveCount}/${MAX_CONSECUTIVE_FOLLOWUPS})`);
+      await notifyAdmin(`🔄 WhatsApp Account ${sessionId} Follow-up (${currentData.consecutiveCount}/${MAX_CONSECUTIVE_FOLLOWUPS}):\nTo: ${jid.split("@")[0]}\nMsg: "${followUpText}"`);
+
+      if (currentData.consecutiveCount < MAX_CONSECUTIVE_FOLLOWUPS) {
+        scheduleWhatsAppFollowUp(jid, sessionId);
+      }
+    } catch (err) {
+      console.error(`[Follow-up WA Error] Failed for ${jid}:`, err.message);
+    }
+  }, delayMs);
+}
 
 function getAuthPath(sessionId) {
   return path.join(__dirname, sessionId === 1 ? "auth_info_baileys" : `auth_info_baileys_${sessionId}`);
@@ -130,6 +203,19 @@ function bindSocketEvents(sock, saveCreds, sessionId) {
       const contactName = msg.pushName || `+${senderPhone}`;
       console.log(`[WA Account ${sessionId} Msg] From ${contactName} (+${senderPhone}): "${conversationText}"`);
 
+      // Clear existing follow-up timer and reset consecutive count on user message
+      const existingFollowUp = contactFollowUps.get(jid);
+      if (existingFollowUp?.timer) {
+        clearTimeout(existingFollowUp.timer);
+      }
+      contactFollowUps.set(jid, {
+        consecutiveCount: 0,
+        lastUserMsgTime: Date.now(),
+        lastBotMsgTime: 0,
+        timer: null,
+        sessionId
+      });
+
       try {
         // Step 1: Human thinking delay before typing (2.5s - 4.5s) to avoid bot detection
         const thinkDelay = 2500 + Math.floor(Math.random() * 2000);
@@ -138,26 +224,43 @@ function bindSocketEvents(sock, saveCreds, sessionId) {
         // NOTE: We intentionally do NOT call sock.readMessages()
         // Incoming messages stay UNREAD on phone so you can easily review them!
 
-        // Step 2: Show WhatsApp typing indicator (safely guarded)
-        try {
-          await sock.sendPresenceUpdate("composing", jid);
-        } catch (e) {}
-
-        // Step 3: Generate response
+        // Step 2: Generate response
         const aiReply = await getAIResponse(jid, conversationText);
 
-        // Step 4: Natural typing duration based on message length
-        const typingDuration = 2500 + Math.floor(Math.random() * 1500) + Math.min(aiReply.length * 30, 2000);
-        await delay(typingDuration);
+        // Step 3: Split into natural chat bubbles (1 or 2 bubbles)
+        const bubbles = splitIntoBubbles(aiReply, 2);
 
-        // Step 5: Send message and reset typing presence to paused
-        await sock.sendMessage(jid, { text: aiReply });
-        try {
-          await sock.sendPresenceUpdate("paused", jid);
-        } catch (e) {}
+        // Step 4: Send bubbles sequentially with human pacing and typing presence
+        for (let i = 0; i < bubbles.length; i++) {
+          const bubble = bubbles[i];
+          const bubbleTyping = 1500 + Math.min(bubble.length * 35, 2500) + Math.floor(Math.random() * 800);
+          try {
+            await sock.sendPresenceUpdate("composing", jid);
+          } catch (e) {}
+          await delay(bubbleTyping);
 
-        const totalDelay = ((thinkDelay + typingDuration) / 1000).toFixed(1);
-        console.log(`[AD WA${sessionId} Replied in ${totalDelay}s] To ${contactName}: "${aiReply}"`);
+          await sock.sendMessage(jid, { text: bubble });
+          try {
+            await sock.sendPresenceUpdate("paused", jid);
+          } catch (e) {}
+
+          if (i < bubbles.length - 1) {
+            await delay(1200 + Math.floor(Math.random() * 1000));
+          }
+        }
+
+        // Update follow-up tracker: bot has sent 1 response turn
+        const followData = contactFollowUps.get(jid) || { lastUserMsgTime: Date.now() };
+        followData.consecutiveCount = 1;
+        followData.lastBotMsgTime = Date.now();
+        followData.sessionId = sessionId;
+        contactFollowUps.set(jid, followData);
+
+        // Schedule re-engagement follow-up in case the contact doesn't reply
+        scheduleWhatsAppFollowUp(jid, sessionId);
+
+        const totalDelay = (thinkDelay / 1000).toFixed(1);
+        console.log(`[AD WA${sessionId} Replied in ${totalDelay}s] To ${contactName}: "${aiReply}" (${bubbles.length} bubbles)`);
 
         const notifyText = `💬 WhatsApp Account ${sessionId} Chat:
 From: ${contactName} (+${senderPhone})
@@ -291,3 +394,15 @@ if (fs.existsSync(getAuthPath(2))) {
 } else {
   sessions.set(2, { sock: null, status: "Not Linked", authPath: getAuthPath(2) });
 }
+
+// Background keep-alive / follow-up trigger for Telegram Serverless Webhook
+setInterval(() => {
+  axios
+    .get("https://telegram-assistant-bot-seven.vercel.app/api/webhook?action=followup")
+    .then((res) => {
+      if (res.data?.dispatched > 0) {
+        console.log(`[Telegram Cron] Dispatched ${res.data.dispatched} follow-ups.`);
+      }
+    })
+    .catch(() => {});
+}, 10 * 60 * 1000); // Every 10 minutes

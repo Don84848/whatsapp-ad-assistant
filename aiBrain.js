@@ -304,9 +304,103 @@ async function getAIResponse(contactId, userText) {
   return isEnglish ? "doing good how are you doing" : "theek hu bhai aap sunao";
 }
 
+function splitIntoBubbles(text, maxBubbles = 2) {
+  if (!text) return [];
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/);
+
+  if (words.length <= 7) return [trimmed];
+
+  const splitRegex = /(?<=[.!?])\s+|\s+(?=(?:aap sunao|tum sunao|wese|batao|kya scene|what about you|how about you|you got|let me know|btw)\b)/i;
+  const parts = trimmed.split(splitRegex).map((s) => s.trim()).filter(Boolean);
+
+  if (parts.length > 1 && parts.length <= maxBubbles) {
+    return parts;
+  }
+
+  if (words.length >= 13 && maxBubbles >= 2) {
+    const mid = Math.floor(words.length / 2);
+    return [words.slice(0, mid).join(" "), words.slice(mid).join(" ")];
+  }
+
+  return [trimmed];
+}
+
+async function getFollowUpResponse(contactId) {
+  let contactMem = chatMemories.get(contactId) || { history: [], lang: "ur" };
+  const isEnglish = contactMem.lang === "en";
+
+  const systemPrompt = isEnglish
+    ? `You are AD chatting with a friend on WhatsApp.
+Your friend has not replied yet.
+Send 1 very short, intelligent, natural message (4 to 9 words) bringing up a casual interesting topic or thought to restart the conversation.
+RULES:
+1. Short text: 4 to 9 words only.
+2. NO commas (,), NO question marks (?), NO periods (.) at end of lines.
+3. Natural everyday English. Never say robotic lines like "are you there" or "why didn't you reply". Talk like a real friend bringing up a new casual topic.`
+    : `You are AD chatting with a friend on WhatsApp in Pakistani Roman Urdu.
+Aapke dost ne pichle message ka jawab nahi diya.
+1 bohot chhota aql wala natural message bhejo (4 se 9 words) naya casual topic shuru karne ke liye (maslan koi naya drama, cricket, weekend plan, ya aam halat).
+RULES:
+1. Sirf 4 se 9 words.
+2. NO commas (,), NO question marks (?), NO periods (.) at end of lines.
+3. Natural everyday Pakistani Roman Urdu (English alphabets only). Zero Hindi words.
+4. "kahan ho" ya "reply do" avoid karo, aam real dost ki tarha koi aql wala topic shuru karo.`;
+
+  const history = (contactMem.history || []).slice(-6);
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history,
+    { role: "user", content: "[Friend hasn't replied yet, send a smart follow-up message to re-open chat]" }
+  ];
+
+  const models = [GROQ_MODEL || "openai/gpt-oss-120b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
+  const uniqueModels = [...new Set(models)];
+
+  for (const model of uniqueModels) {
+    if (!GROQ_API_KEY) break;
+    try {
+      const isReasoning = model.startsWith("openai/");
+      const responseData = await postJson(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+          model,
+          messages,
+          temperature: 0.68,
+          max_tokens: isReasoning ? 180 : 100,
+          reasoning_effort: isReasoning ? "low" : undefined,
+          stop: ["\nUser:", "\nContact:"]
+        },
+        {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        8000
+      );
+
+      const raw = responseData?.choices?.[0]?.message?.content;
+      if (raw && raw.trim()) {
+        const cleaned = cleanHumanText(raw);
+        if (cleaned) {
+          history.push({ role: "assistant", content: cleaned });
+          contactMem.history = history.slice(-8);
+          chatMemories.set(contactId, contactMem);
+          return cleaned;
+        }
+      }
+    } catch (e) {
+      console.error(`Follow-up error on ${model}:`, e.message);
+    }
+  }
+
+  return isEnglish ? "was just reading an interesting article" : "wese ek naya plan soch raha tha";
+}
+
 module.exports = {
   getAIResponse,
   cleanHumanText,
   buildSystemPrompt,
-  resolveLanguage
+  resolveLanguage,
+  splitIntoBubbles,
+  getFollowUpResponse
 };
