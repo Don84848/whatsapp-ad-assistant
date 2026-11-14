@@ -27,223 +27,77 @@ async function postJson(url, payload, headers, timeoutMs = 8000) {
   return res.data;
 }
 
-// Per-contact conversation memory (stores up to last 12 messages per contact)
+// Per-contact conversation memory (stores up to last 8 messages per contact)
 const chatMemories = new Map();
 
-const CASUAL_GREETINGS = {
-  hi: [
-    "yo bro kya scene",
-    "yo bro kya scene hai",
-    "yo bro kya scene",
-    "yo bro kya scene"
-  ],
-  kya_haal_hai: [
-    "main theek hu",
-    "main theek aur sunao",
-    "main theek hu aap sunao",
-    "theek hu aur sunao"
-  ],
-  kuch_nahi: [
-    "sahi hai",
-    "theek hai",
-    "aur sunao",
-    "chal sahi hai"
-  ],
-  aur_sunao: [
-    "sab theek",
-    "kuch khas nahi",
-    "bas chill hai",
-    "sab theek chal raha"
-  ],
-  theek_ho: [
-    "haan theek hu",
-    "haan bilkul fit",
-    "haan sab theek",
-    "fit hu"
-  ],
-  kya_scene_hai: [
-    "kuch khas nahi",
-    "bas chill hai",
-    "free betha tha",
-    "bas ghar pe hu"
-  ],
-  kahan_ho: [
-    "ghar pe hu",
-    "lahore mein hu",
-    "bas bahar tha",
-    "ghar pe hi hu"
-  ],
-  salam: [
-    "walaikum assalam kya scene hai",
-    "walaikum assalam theek ho bro",
-    "walaikum assalam aur sunao"
-  ],
-  bro: [
-    "haan bhai bolo",
-    "haan bro sunao",
-    "bolo kya scene"
-  ],
-  how_are_you: [
-    "im good what about you",
-    "doing good whats up",
-    "all good here"
-  ],
-  ok: [
-    "sahi hai",
-    "done",
-    "theek hai",
-    "chal theek"
-  ],
-  bye: [
-    "allah hafiz bro",
-    "chal theek take care",
-    "bye bro",
-    "allah hafiz"
-  ],
-  thanks: [
-    "koi scene nahi bro",
-    "welcome bro",
-    "koi baat nahi",
-    "chill hai bro"
-  ]
-};
+// Language detection tokens (derived directly from production Telegram bot)
+const STRICT_URDU_TOKENS = /\b(kya|hai|hain|bhai|yr|yar|karo|kr|kro|krna|krdo|ruko|chahiye|chahye|chaiye|kitne|kitna|kitny|kaunsa|konsa|hoga|batao|btao|sunao|theek|thik|kaise|kesy|kaisa|aap|tum|mein|bhi|nahi|nhi|nai|dekh|lelo|lena|dedo|milega|milta|sasta|mehnga|mehanga|kahan|kidhar|umar|haal|wala|wali|acha|achha|behtar|kab|ayega|aayega|aaya|abhi|thora|zara|bhejo|mujhe|mjhe|apko|hum|haan|hanji|salam|aoa|assalam|waqt|masla|kaam|chalta|chalega|chlega|paisay|paise|samajh|samjho|bohot|bahut|zyada|pata|pta|karna|dijiye|lenge|denge|rakho|bhej|kisko|kiska|mera|tera|hamara|apna|kesa|krte|karti|karna)\b/gi;
+const CLEAR_ENGLISH_TOKENS = /\b(what|where|when|how|which|why|who|is|are|was|were|do|does|did|can|could|would|should|you|your|need|want|price|prices|cost|buy|link|please|yes|yeah|hello|hey|thanks|thank|help|give|send|warranty|account|available|payment|pay|work|working|check|still|waiting|sorry|have|got|this|that|with|from|only|english|understand|speak)\b/gi;
 
-function getDirectCasualGreeting(text) {
-  if (!text) return null;
-  const t = text.toLowerCase().trim().replace(/[^a-z0-9\s]/g, "");
-
-  // "hi" / "hey" / "hello" -> "yo bro kya scene"
-  if (/^(hi|hello|hey|yo|oye|helo)$/.test(t)) {
-    const list = CASUAL_GREETINGS.hi;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "kya haal hai" / "kaise ho" -> "main theek hu" / "main theek aur sunao"
-  if (/^(kya haal hai|kya hal hai|kaise ho|kese ho|kya haal|kya hal|hal chal)$/.test(t)) {
-    const list = CASUAL_GREETINGS.kya_haal_hai;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "kuch nahi" / "kuch ni" -> "sahi hai" / "theek hai" / "aur sunao"
-  if (/^(kuch nahi|kuch ni|kuch nai|kch nhi|kch ni|kch nahi|kuch nhi|nothing)$/.test(t)) {
-    const list = CASUAL_GREETINGS.kuch_nahi;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "aur sunao" / "or sunao" -> "sab theek" / "kuch khas nahi" / "bas chill hai"
-  if (/^(aur sunao|or sunao|aur batao|or batao|sunao)$/.test(t)) {
-    const list = CASUAL_GREETINGS.aur_sunao;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "kahan ho" / "kidhar ho" / "kahan ho abhi" -> "ghar pe hu" / "lahore mein hu"
-  if (/^(kahan|kidhar)(\s+(ho|hai|pe\s+ho|rehte\s+ho|hain))?(\s+(abhi|ajkal|aj\s+kal))?$/.test(t)) {
-    const list = CASUAL_GREETINGS.kahan_ho;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "theek ho" -> "haan theek hu" / "haan fit"
-  if (/^(theek\s+ho|theek\s+hain|thik\s+ho|sab\s+theek|sab\s+theek\s+hai|sab\s+fit|fit\s+ho)$/.test(t)) {
-    const list = CASUAL_GREETINGS.theek_ho;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "kya scene hai" / "kya chal raha hai" -> "kuch khas nahi" / "bas chill hai"
-  if (/^(kya\s+scene|kya\s+scene\s+hai|kya\s+chal\s+raha\s+hai|kya\s+chal\s+raha|kya\s+kr\s+rhe\s+ho|kya\s+kar\s+rahe\s+ho|kya\s+ho\s+raha\s+hai|kya\s+kar\s+rahe)$/.test(t)) {
-    const list = CASUAL_GREETINGS.kya_scene_hai;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "salam"
-  if (/^(salam|slam|aoa|assalam o alaikum|aslam o alikum|asalam alaikum|assalamualaikum)$/.test(t)) {
-    const list = CASUAL_GREETINGS.salam;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "bro" / "bhai"
-  if (/^(bro|bhai|ad|ad bhai|oye ad)$/.test(t)) {
-    const list = CASUAL_GREETINGS.bro;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "how are you"
-  if (/^(how are you|how r u|how are u|whats up|what's up|sup)$/.test(t)) {
-    const list = CASUAL_GREETINGS.how_are_you;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "ok"
-  if (/^(ok|okay|theek hai|thik hai|acha|achha|sahi|sahi hai|done|chal theek)$/.test(t)) {
-    const list = CASUAL_GREETINGS.ok;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "bye" / "allah hafiz"
-  if (/^(bye|tata|allah hafiz|alvida|cya|take care)$/.test(t)) {
-    const list = CASUAL_GREETINGS.bye;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  // "thanks" / "shukriya"
-  if (/^(thanks|shukriya|thank you|thx|ty|bohot shukriya)$/.test(t)) {
-    const list = CASUAL_GREETINGS.thanks;
-    return list[Math.floor(Math.random() * list.length)];
-  }
-
-  return null;
+function detectLanguage(text) {
+  if (!text) return "ur";
+  if (/\b(only english|speak english|in english|english please|no urdu)\b/i.test(text)) return "en";
+  if (/[\u0600-\u06FF]/.test(text)) return "ur";
+  const urMatches = (text.match(STRICT_URDU_TOKENS) || []).length;
+  const enMatches = (text.match(CLEAR_ENGLISH_TOKENS) || []).length;
+  if (urMatches >= 1) return "ur";
+  if (enMatches >= 2 && urMatches === 0) return "en";
+  return "ur"; // Default to Pakistani Roman Urdu
 }
 
-function getLiveTimeReply(text) {
-  if (!text) return null;
-  const t = text.toLowerCase().trim();
-  if (/(^|\s)(kya|kia|kis|kitna)\s*(time|waqt|baja|bj)|(^|\s)(time|waqt)\s*(kya|kia|kitna|howa|hua|batao)/i.test(t)) {
-    const liveTime = new Date().toLocaleTimeString("en-US", {
-      timeZone: "Asia/Karachi",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true
-    });
-    const variants = [
-      `abhi ${liveTime} hai`,
-      `abhi ${liveTime} ho raha hai`,
-      `${liveTime} hai bro`,
-      `${liveTime} ho raha hai abhi`
-    ];
-    return variants[Math.floor(Math.random() * variants.length)];
+function cleanHumanText(text) {
+  if (!text) return "";
+  let clean = text.trim();
+
+  // Privacy & Identity filters: Never mention Awais or Daraz Hacker
+  clean = clean.replace(/\bawais\b/gi, "AD");
+  clean = clean.replace(/@?daraz[_\s]?hacker/gi, "AD");
+
+  // Strip markdown formatting
+  clean = clean.replace(/\*\*|__/g, "");
+  clean = clean.replace(/[#^*~`]/g, "");
+
+  // Convert Indian Hindi vocabulary to natural Pakistani Roman Urdu
+  const HINDI_REPLACEMENTS = [
+    [/\bvich\b/gi, "mein"],
+    [/\bdhanyawad\b/gi, "shukriya"],
+    [/\bnamaste\b/gi, "salam"],
+    [/\bnamaskar\b/gi, "salam"],
+    [/\bkripya\b/gi, "please"],
+    [/\bturant\b/gi, "abhi"],
+    [/\bchhod\b/gi, "chor"],
+    [/\bbataiye\b/gi, "batao"],
+    [/\bkijiye\b/gi, "karo"],
+    [/\bsamay\b/gi, "time"],
+    [/\bkaunsa\b/gi, "konsa"],
+    [/\bhumara\b/gi, "hamara"]
+  ];
+  for (const [pattern, replacement] of HINDI_REPLACEMENTS) {
+    clean = clean.replace(pattern, replacement);
   }
-  return null;
+
+  // Remove commas, question marks (English and Urdu), exclamation marks
+  clean = clean.replace(/[,?؟!;~]/g, " ");
+
+  // Replace newlines with spaces so words from different lines don't get merged
+  clean = clean.replace(/[\r\n]+/g, " ");
+
+  // Strip isolated or trailing periods
+  clean = clean.replace(/(?<!\d)\.|\.(?!\d)/g, " ");
+
+  // Deduplicate words or phrases repeated consecutively (fixes stuttering e.g. "theek theek" -> "theek")
+  clean = clean.replace(/\b(\w+)(?:\s+\1\b)+/gi, "$1");
+  clean = clean.replace(/\b(\w+\s+\w+)(?:\s+\1\b)+/gi, "$1");
+  clean = clean.replace(/\b(\w+\s+\w+\s+\w+)(?:\s+\1\b)+/gi, "$1");
+
+  // Normalize whitespace
+  clean = clean.replace(/\s+/g, " ");
+
+  return clean.trim();
 }
 
-function getLiveDateReply(text) {
-  if (!text) return null;
-  const t = text.toLowerCase().trim();
-  if (/(^|\s)(aaj|aj)\s*(konsa|kya|kia)\s*(din|date|tareekh|tarikh)/i.test(t)) {
-    const now = new Date();
-    const day = now.toLocaleDateString("en-US", { timeZone: "Asia/Karachi", weekday: "long" });
-    const date = now.toLocaleDateString("en-US", { timeZone: "Asia/Karachi", day: "numeric", month: "long" });
-    if (/din/i.test(t)) {
-      return `aaj ${day} hai bro`;
-    }
-    return `aaj ${date} hai bro`;
-  }
-  return null;
-}
-
-function getStoreSellingRejection(text) {
-  if (!text) return null;
-  const t = text.toLowerCase().trim();
-  if (/(netflix|spotify|youtube premium|prime video|account chahiye|daraz store|daraz\.pk|s\.daraz|account mil|account kharidna|price kya hai|rate kya hai|kitne ka milega)/i.test(t)) {
-    const variants = [
-      "bhai ye mera personal whatsapp hai mere paas koi account nahi hai",
-      "bhai main personal whatsapp pe hu yahan koi accounts ya store nahi hai",
-      "personal whatsapp hai bro yahan koi selling nahi hoti"
-    ];
-    return variants[Math.floor(Math.random() * variants.length)];
-  }
-  return null;
-}
-
-function getSystemPrompt() {
+function buildSystemPrompt(userLang) {
+  const isEnglish = userLang === "en";
   const now = new Date();
   const pkTime = now.toLocaleTimeString("en-US", {
     timeZone: "Asia/Karachi",
@@ -259,117 +113,52 @@ function getSystemPrompt() {
     year: "numeric"
   });
 
-  return `You are AD, an everyday real human friend casually texting on WhatsApp from Lahore, Pakistan.
-Current real-time right now in Pakistan: ${pkTime}, ${pkDate}.
+  const languageProfile = isEnglish
+    ? `STRICT LANGUAGE PROFILE: Customer speaks ENGLISH ONLY. REPLY 100% IN SIMPLE CASUAL ENGLISH ONLY! NEVER use any Urdu, Hindi, or foreign words!`
+    : `STRICT LANGUAGE PROFILE: Customer speaks PAKISTANI ROMAN URDU. Reply 100% in casual everyday Pakistani Roman Urdu (avoid formal Hindi like turant/chhod/bataiye/vich/dhanyawad/namaste/pranaam/kripya)!`;
 
-CRITICAL CHATTING STYLE RULES (ULTRA-SHORT & NATURAL TEXTING):
-1. ULTRA-SHORT REPLIES (MANDATORY): Replies MUST be ultra-short (under 8 words max, ideally 2 to 5 words). Never write long sentences, never write multiple thoughts, never ramble.
-   Real texting examples:
-   - "hi" -> "yo bro kya scene"
-   - "kya haal hai" -> "main theek hu"
-   - "aur sunao" -> "sab theek"
-   - "kuch nahi" -> "sahi hai"
-   - "kahan ho" -> "ghar pe hu"
-   - "kya chal raha hai" -> "kuch khas nahi"
-   - "weather kaisa hai" -> "thoda thanda hai yahan"
-   - "25 * 4" -> "100"
-   - "theek ho" -> "haan fit"
-   - "ok" -> "done"
-2. DIRECT REASONING: Understand the user's intent immediately. Answer ONLY the current message directly in 1 to 5 words. Do NOT carry over phrases from previous topics.
-3. ABSOLUTE PUNCTUATION BAN:
-   - NO COMMAS (,) under any circumstances.
-   - NO QUESTION MARKS (?) or Urdu question marks (؟). Never end any sentence with a question mark.
-   - NO EXCLAMATION MARKS (!). No markdown bold/italics, no bullet points.
-4. IDENTITY & PRIVACY:
-   - Your name is strictly "AD". You speak in first-person ("main AD hu").
-   - NEVER EVER mention or acknowledge the name "Awais". You do not know any Awais.
-   - You are a real human hanging out, never say you are a bot or AI.
-5. STRICTLY NO SELLING / NO STORE:
-   - This is strictly your personal WhatsApp. You do not sell anything.
-   - If anyone asks for accounts (Netflix, Spotify, etc.) or store items, say: "mere paas koi account nahi hai personal whatsapp hai".
-6. LANGUAGE:
-   - Casual Roman Urdu for Urdu/Hindi messages, casual English for English messages.`;
-}
+  const humanAnswerExample = isEnglish ? `"no i am human"` : `"nahi human hu"`;
 
-function cleanHumanText(text) {
-  if (!text) return "";
-  let clean = text.trim();
+  return `You are AD chatting on WhatsApp.
+Current live time in Pakistan: ${pkTime}, ${pkDate}.
+${languageProfile}
 
-  // Strict privacy filter: never leak Awais
-  clean = clean.replace(/\bawais\b/gi, "AD");
+CORE RULES:
+1. HUMAN STYLE: Text casually like a real person on WhatsApp—short and natural (1-2 lines for chat). No periods (.) or (!) at end of lines. No commas (,) and no question marks (?). No markdown (** or __).
+2. PRIVACY & IDENTITY: You are "AD". Speak in first-person ("main AD hu", "I am AD"). NEVER mention "Awais", "@Daraz_Hacker", "Daraz Hacker", or real full names. Never admit being an AI/bot (${humanAnswerExample}).
+3. NO SELLING / NO STORE (STRICT): This is strictly your personal WhatsApp. Zero selling, zero store, zero products. If someone asks about buying accounts, Netflix, Spotify, prices, or store products, reply politely: "bhai ye mera personal WhatsApp hai yahan koi selling ya store nahi hai".
+4. DIRECT & INTELLIGENT: Answer what the person actually asked directly and politely. If they ask a question (time, math, facts, or casual conversation), answer it clearly like a normal human friend. Never repeat yourself. Never stutter or repeat words.
+5. CASUAL BANTER: If they greet you (salam, hi, kya haal hai), greet them back warmly and naturally ("walaikum assalam kya haal hain", "theek hu aap sunao", "haan bhai bolo"). Avoid robotic slang, avoid forced phrases like "yo bro", "chal theek", "kya scene". Talk like a normal, respectful, real human friend.
 
-  // Normalize Unicode whitespace and newlines to simple space
-  clean = clean.replace(/[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000\uFEFF\r\n]+/g, " ");
-
-  // Remove commas, question marks (English and Urdu), exclamation marks, semicolons, brackets, math symbols
-  clean = clean.replace(/[,?؟!;~#_\/\[\](){}]/g, " ");
-
-  // Remove full stops and replace with space (leaves colons in time like 8:15 PM)
-  clean = clean.replace(/\.+/g, " ");
-
-  // Remove quotes
-  clean = clean.replace(/["'`]/g, "");
-
-  // Normalize whitespace
-  clean = clean.replace(/\s+/g, " ");
-
-  // Remove immediate duplicate phrase loops (e.g. "ghar pe hu ghar pe hu" -> "ghar pe hu")
-  clean = clean.replace(/\b([a-zA-Z0-9]+(\s+[a-zA-Z0-9]+){1,3})\s+\1\b/gi, "$1");
-
-  // Limit to at most ~10 words for ultra-human short texting
-  const words = clean.split(" ");
-  if (words.length > 10) {
-    clean = words.slice(0, 8).join(" ");
-  }
-
-  return clean.trim();
+FINAL CHECK: ${isEnglish ? "Write ONLY pure English words!" : "Write ONLY casual Pakistani Roman Urdu!"}`;
 }
 
 async function getAIResponse(contactId, userText) {
-  // 1. Check direct time query
-  const timeReply = getLiveTimeReply(userText);
-  if (timeReply) return timeReply;
-
-  // 2. Check direct date query
-  const dateReply = getLiveDateReply(userText);
-  if (dateReply) return dateReply;
-
-  // 3. Check direct store / selling query
-  const storeReply = getStoreSellingRejection(userText);
-  if (storeReply) return storeReply;
-
-  // 4. Check pure standalone greeting
-  const quickGreeting = getDirectCasualGreeting(userText);
-  if (quickGreeting) {
-    let history = chatMemories.get(contactId) || [];
-    history.push({ role: "user", content: userText });
-    history.push({ role: "assistant", content: quickGreeting });
-    chatMemories.set(contactId, history.slice(-12));
-    return quickGreeting;
-  }
-
   if (!GROQ_API_KEY) {
-    return "theek hu bro aap sunao kya scene hai";
+    return "theek hu bhai aap sunao";
   }
 
-  // Get or initialize conversation memory (limited to last 4 to save credits/tokens)
+  const userLang = detectLanguage(userText);
+  const systemPrompt = buildSystemPrompt(userLang);
+
+  // Get or initialize conversation memory (last 6 messages)
   let history = chatMemories.get(contactId) || [];
-  history = history.slice(-4);
+  history = history.slice(-6);
 
   const messages = [
-    { role: "system", content: getSystemPrompt() },
+    { role: "system", content: systemPrompt },
     ...history,
     { role: "user", content: userText }
   ];
 
-  // Cost & credit-optimized models: 20b and qwen first to save credits, fallback to 120b
+  // Try active models with optimized parameters
   const modelsToTry = [
+    GROQ_MODEL || "openai/gpt-oss-120b",
+    "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
-    "qwen/qwen3.8-27b",
-    GROQ_MODEL || "openai/gpt-oss-120b"
+    "qwen/qwen3.8-27b"
   ];
 
-  // Deduplicate model names preserving order
   const uniqueModels = [...new Set(modelsToTry)];
 
   for (const model of uniqueModels) {
@@ -380,8 +169,8 @@ async function getAIResponse(contactId, userText) {
         {
           model: model,
           messages: messages,
-          temperature: 0.7,
-          max_tokens: isReasoning ? 120 : 60,
+          temperature: 0.52,
+          max_tokens: isReasoning ? 220 : 140,
           reasoning_effort: isReasoning ? "low" : undefined
         },
         {
@@ -397,7 +186,7 @@ async function getAIResponse(contactId, userText) {
         if (cleaned) {
           history.push({ role: "user", content: userText });
           history.push({ role: "assistant", content: cleaned });
-          chatMemories.set(contactId, history.slice(-4));
+          chatMemories.set(contactId, history.slice(-6));
           return cleaned;
         }
       }
@@ -406,19 +195,17 @@ async function getAIResponse(contactId, userText) {
     }
   }
 
-  // Smart fallback if LLM ever fails: do NOT give disconnected answers
+  // Natural fallback if all models fail
   const isQuestion = /\b(kya|kia|kaise|kese|kitna|kitne|kahan|kidhar|kab|kyun|kis|batao|who|what|where|when|why|how)\b/i.test(userText);
   if (isQuestion) {
-    return "samajh nahi aayi bro thoda clear bolo kya keh rahe ho";
+    return userLang === "en" ? "could you say that again please" : "samajh nahi aayi bhai thoda dobara bolo kya keh rahe ho";
   }
-
-  const isUrdu = /\b(hai|hain|bhai|yr|yar|karo|kr|theek|thik|aap|tum|mein|bhi|nahi|nhi)\b/i.test(userText);
-  return isUrdu ? "theek hai bhai aap sunao" : "doing good bro whats up";
+  return userLang === "en" ? "doing good how are you" : "theek hu bhai aap sunao kya haal hain";
 }
 
 module.exports = {
   getAIResponse,
   cleanHumanText,
-  getDirectCasualGreeting,
-  getLiveTimeReply
+  buildSystemPrompt,
+  detectLanguage
 };
